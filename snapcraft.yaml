@@ -457,6 +457,7 @@ parts:
       - libspeechd2
       - libvulkan1
       - libxt6
+      - opensc-pkcs11
       - mesa-vulkan-drivers
       - pipewire-bin
       - pipewire-pulse
