@@ -44,7 +44,7 @@ jobs:
             git config user.name "GitHub Actions"
             git config user.email "actions@github.com"
             git commit -m "Bump version to the latest release candidate (${{ env.new_version }})."
-            git push stable
+            git push
           else
             echo "New major version (${{ env.new_version }}), please merge the beta branch into the stable one."
           fi
