@@ -219,39 +219,12 @@ parts:
       - wget
     build-environment:
       - LLVM_RELEASE: "17.0.6"
-    override-pull: |
-      ROOT=https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_RELEASE
-      # Download the binaries
-      # gnueabihf used to be tar.xz but at least 17.0.6 is not?
-      BINARIES_BASENAME=clang+llvm-$LLVM_RELEASE
-      if [ $CRAFT_ARCH_BUILD_ON = "amd64" ]; then
-        BINARIES_SUFFIX=x86_64-linux-gnu-ubuntu-22.04.tar.xz
-      elif [ $CRAFT_ARCH_BUILD_ON = "armhf" ]; then
-        BINARIES_SUFFIX=armv7a-linux-gnueabihf.tar.gz
-      elif [ $CRAFT_ARCH_BUILD_ON = "arm64" ]; then
-        BINARIES_SUFFIX=aarch64-linux-gnu.tar.xz
-      fi
-      case "$BINARIES_SUFFIX" in
-        *gz) tar_flag="--gzip";;
-        *xz) tar_flag="--xz";;
-      esac
-      wget -O - $ROOT/$BINARIES_BASENAME-$BINARIES_SUFFIX | tar -x "$tar_flag"
-      # And cmake-$LLVM_RELEASE.src needed on LLVM >= 15.0.0
-      wget -O - $ROOT/cmake-$LLVM_RELEASE.src.tar.xz | tar -x --xz
-      mv cmake-$LLVM_RELEASE.src cmake
-      # And the sources to build LLVMgold.so, which isn't distributed in a binary form
-      wget -O - $ROOT/llvm-$LLVM_RELEASE.src.tar.xz | tar -x --xz
     override-build: |
-      craftctl default
-      cd llvm-$LLVM_RELEASE.src
-      mkdir build
-      cd build
-      cmake -DLLVM_BINUTILS_INCDIR=/usr/include -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_TESTS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$CRAFT_PART_INSTALL/usr ..
-      make -j$CRAFT_PARALLEL_BUILD_COUNT install-LLVMgold-stripped
-    override-stage: |
-      craftctl default
-      mkdir -p usr
-      cp -R $CRAFT_PART_BUILD/clang+llvm-$LLVM_RELEASE-*/* usr/
+      git clone -b llvmorg-$LLVM_RELEASE --depth=1 https://github.com/llvm/llvm-project
+      cd llvm-project
+      mkdir 1b; cd 1b
+      cmake -G Ninja -DLLVM_ENABLE_PROJECTS=clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/ -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BINUTILS_INCDIR=/usr/include ../llvm
+      ninja
     override-prime: ''
 
   dump-syms:
@@ -314,8 +287,8 @@ parts:
       wget $ROOT/libclang_rt.builtins-wasm32-wasi-$WASI_RELEASE.tar.gz
     override-build: |
       craftctl default
-      tar -C $CRAFT_STAGE -xf wasi-sysroot-$WASI_RELEASE.tar.gz
-      tar -C $CRAFT_STAGE/usr/lib/clang/* -xf libclang_rt.builtins-wasm32-wasi-$WASI_RELEASE.tar.gz
+      tar -C / -xf wasi-sysroot-$WASI_RELEASE.tar.gz
+      tar -C /usr/lib/clang/* -xf libclang_rt.builtins-wasm32-wasi-$WASI_RELEASE.tar.gz
     override-prime: ''
 
   mozconfig:
@@ -494,7 +467,7 @@ parts:
       export LDFLAGS="-Wl,-rpath-link=$CRAFT_PART_BUILD/obj-$TARGET_TRIPLET/dist/bin${LDFLAGS:+ $LDFLAGS}"
       export LD_LIBRARY_PATH="$CRAFT_PART_BUILD/obj-$TARGET_TRIPLET/dist/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       export PKG_CONFIG_PATH=$GNOME_SDK_SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pkgconfig/:$GNOME_SDK_SNAP/usr/lib/pkgconfig/:$GNOME_SDK_SNAP/usr/share/pkgconfig/:/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pkgconfig/
-      export WASI_SYSROOT=$CRAFT_STAGE/wasi-sysroot
+      export WASI_SYSROOT=/wasi-sysroot
       export MOZBUILD_STATE_PATH=$CRAFT_PART_BUILD/.mozbuild
       export MOZCONFIG="$CRAFT_STAGE/mozconfig"
       BUILD_DBGSYMS=false
