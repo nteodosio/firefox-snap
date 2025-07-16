@@ -318,27 +318,6 @@ parts:
       tar -C $CRAFT_STAGE/usr/lib/clang/* -xf libclang_rt.builtins-wasm32-wasi-$WASI_RELEASE.tar.gz
     override-prime: ''
 
-  nodejs:
-    plugin: nil
-    build-packages:
-      - wget
-    build-environment:
-      - NODEJS_RELEASE: "v18.12.1"
-    override-pull: |
-      ROOT=https://nodejs.org/dist/$NODEJS_RELEASE/node-$NODEJS_RELEASE-linux-
-      if [ $CRAFT_ARCH_BUILD_ON = "amd64" ]; then
-        SUFFIX=x64.tar.xz
-      elif [ $CRAFT_ARCH_BUILD_ON = "armhf" ]; then
-        SUFFIX=armv7l.tar.xz
-      elif [ $CRAFT_ARCH_BUILD_ON = "arm64" ]; then
-        SUFFIX=arm64.tar.xz
-      fi
-      wget -O - $ROOT$SUFFIX | tar -x --xz
-    override-build: |
-      craftctl default
-      cp -R node-$NODEJS_RELEASE-linux-*/ $CRAFT_PART_INSTALL/usr/
-    override-prime: ''
-
   mozconfig:
     plugin: nil
     # This should be 'pull' step so that firefox.pull step can add more
@@ -366,7 +345,6 @@ parts:
       - firefox-langpacks
       - hunspell
       - mozconfig
-      - nodejs
       - rust
       - wasi-sdk
     build-packages:
@@ -425,6 +403,7 @@ parts:
       - make
       - mercurial
       - nasm
+      - nodejs
       - quilt
       - sed
       - unzip
