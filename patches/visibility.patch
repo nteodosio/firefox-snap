@@ -1,3 +1,14 @@
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -2426,6 +2426,6 @@
+ @depends(target, build_environment)
+ def visibility_flags(target, env):
+-    if target.os != "WINNT":
+-        if target.kernel in ("Darwin", "FreeBSD", "OpenBSD"):
++    if 1:
++        if 1:
+             return ("-fvisibility=hidden", "-fvisibility-inlines-hidden")
+         return (
 --- a/xpcom/base/nsCycleCollectionNoteChild.h
 +++ b/xpcom/base/nsCycleCollectionNoteChild.h
 @@ -12,10 +12,12 @@
