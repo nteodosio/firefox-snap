@@ -289,11 +289,6 @@ parts:
       cargo install cbindgen
 
       QUILT_PATCHES=$CRAFT_PROJECT_DIR/patches quilt push -a
-      BUILD_DBGSYMS=false
-      # https://bugzilla.mozilla.org/show_bug.cgi?id=1980339
-      if [ $CRAFT_ARCH_BUILD_FOR != "riscv64" ]; then
-        BUILD_DBGSYMS=true
-      fi
       # GitHub Actions is limited to 2 CPUs and 7GB RAM, and
       # too much debug info from Rust will make gkrust linkage fail.
       # Same goes for arm64 builds on Launchpad.  It seems we can't
@@ -310,11 +305,7 @@ parts:
         patch -p1 < $CRAFT_PROJECT_DIR/patches/thin-lto.patch
       fi
       export MOZCONFIG="$CRAFT_STAGE/mozconfig"
-      if [ $BUILD_DBGSYMS = "true" ]; then
-        echo "ac_add_options --enable-debug-symbols" >> $MOZCONFIG
-      else
-        echo "ac_add_options --disable-debug-symbols" >> $MOZCONFIG
-      fi
+      echo "ac_add_options --enable-debug-symbols" >> $MOZCONFIG
       if [ $CRAFT_ARCH_BUILD_FOR = "amd64" ]; then
         # Enable LTO and PGO (https://firefox-source-docs.mozilla.org/build/buildsystem/pgo.html) only on amd64 for now.
         # Running PGO on arm64 takes forever (> 4 days in the Launchpad build environment!).
@@ -363,7 +354,7 @@ parts:
       else
         $MACH build -j$CRAFT_PARALLEL_BUILD_COUNT
       fi
-      if [ $BUILD_DBGSYMS = "true" ]; then
+      if [ $CRAFT_ARCH_BUILD_FOR != "riscv64" ]; then
         DUMP_SYMS=$CRAFT_STAGE/usr/bin/dump_syms $MACH buildsymbols
       fi
       $MACH install
@@ -372,7 +363,7 @@ parts:
       mkdir -p $DISTRIBUTION/extensions
       cp browser/branding/official/default256.png $CRAFT_PART_INSTALL/
       # On Risc-V Launchpad builders: 407 Proxy Authentication Required'))': /simple/fluent-runtime/
-      if [ $BUILD_DBGSYMS = "true" ]; then
+      if [ $CRAFT_ARCH_BUILD_FOR != "riscv64" ]; then
         cp obj-*/dist/firefox-*.crashreporter-symbols.zip $CRAFT_STAGE/debug-symbols/
       fi
     override-stage: |
