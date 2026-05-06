@@ -5,5 +5,8 @@ ac_add_options --enable-official-branding
 ac_add_options --disable-updater
 ac_add_options --disable-tests
 ac_add_options --enable-geckodriver
+ac_add_options --enable-debug
+ac_add_options --enable-optimize='-O0 -g3'
+ac_add_options --disable-strip
 ac_add_options --enable-frame-pointers
 export MOZILLA_OFFICIAL=1
