@@ -8,3 +8,44 @@ reason to do otherwise.
 [1]https://snapcraft.io/firefox
 [2]https://launchpad.net/~mozilla-snaps/+snaps
 
+Read-only Firefox MSRV monitor
+------------------------------
+
+From the repository root, with Python 3.11+, PyYAML and dpkg available:
+
+    python3 -B .github/scripts/check-rust-msrv.py
+
+The command reads mozilla-central declarations through Mozilla's official GitHub
+main branch, pins the nightly snap recipe, records published-nightly source
+context, and checks official Ubuntu Noble Rust/Cargo publications for amd64 and
+arm64 when a compiler shortfall exists. It never uses the runner's installed
+compiler or executes downloaded source, build steps or compiler helpers.
+
+The JSON outcome is no-update-needed, compiler-available, publication-gap, or
+unknown. Exit status 0 means the conclusion was established (including an actual
+publication gap); status 1 means evidence was incomplete or failed. The report
+includes revisions, publication links, per-architecture versions and timestamped
+response hashes. A family lower bound is not a claim about an installed patch
+version, and package publication is not a successful installation/build test.
+Backports results are restricted to the arm64 components configured by the
+recipe. Full upstream MSRV suitability is checked before Debian ordering selects
+the highest eligible revision; observed older packages remain visible as evidence.
+
+Mutable metadata responses must be at most one hour old, allowing five minutes
+of future clock skew. History/pagination and response sizes are bounded; reaching
+a bound yields unknown, never a package-absence claim. GITHUB_TOKEN is optional
+for GitHub API rate limits and is not forwarded to other hosts. No token is
+needed for anonymous public reads. The per-request timeout defaults to 30 seconds
+and can be changed with --timeout.
+
+This command only reads HTTPS resources and prints its report. It does not
+persist state, change the recipe, push branches, open Issues/PRs, file Launchpad
+bugs, install packages or run builds. No workflow or automatic execution is
+installed by this change.
+
+Run the deterministic command-level tests without network access or credentials:
+
+    python3 -B -m unittest discover -s .github/scripts/tests -v
+
+The tests replace external HTTP I/O, reject non-GET requests and filesystem
+mutations, and exercise the real command and Debian version comparator.

@@ -1,0 +1,55 @@
+# Relevant recipe structure recorded during the October 2026 investigation.
+# This is input data only: no build step in this fixture may be executed.
+name: firefox
+version: "161.0a1"
+base: core24
+package-repositories:
+  - type: apt
+    architectures: [arm64]
+    components: [main, multiverse, universe]
+    suites: [noble, noble-updates, noble-security, noble-backports]
+    key-id: F6ECB3762474EDA9D21B7022871920D1991BC93C
+    url: http://ports.ubuntu.com/
+parts:
+  dump-syms:
+    plugin: nil
+    build-packages:
+      - on amd64:
+        - to amd64:
+          - cargo-1.91
+        - to arm64:
+          - cargo-1.91:arm64
+      - else:
+        - cargo-1.91
+      - curl
+      - git
+      - python3-yaml
+    override-build: |
+      craftctl default
+      cargo-1.91 build --release
+  firefox:
+    plugin: nil
+    build-packages:
+      - on amd64:
+        - to amd64:
+          - rustc-1.91
+          - cargo-1.91
+          - clang-19
+        - to arm64:
+          - rustc-1.91:arm64
+          - cargo-1.91:arm64
+          - clang-19:arm64
+      - else:
+        - rustc-1.91
+        - cargo-1.91
+        - clang-19
+      - cmake
+    override-build: |
+      craftctl default
+      rustv=1.91
+      ln -sf "/usr/bin/rustc-${rustv}" "$unvBinDir/rustc"
+      ln -sf "/usr/bin/rust-${rustv}-clang" "$unvBinDir/rust-clang"
+      ln -sf "/usr/bin/rust-${rustv}-lld" "$unvBinDir/rust-lld"
+      ln -sf "/usr/bin/rust-${rustv}-llvm-dwp" "$unvBinDir/rust-llvm-dwp"
+      ln -sf "/usr/bin/cargo-${rustv}" "$unvBinDir/cargo"
+      cargo install cbindgen
