@@ -2,11 +2,12 @@
 # Copyright (C) 2026 Canonical Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Read Firefox MSRV and nightly snap evidence without writing anywhere.
+"""Check Firefox MSRV and preview a nightly snap compiler-update PR.
 
 Requires Python 3.11+, PyYAML and dpkg. Output is a JSON report; exit status 1
 means evidence is unknown, not that Ubuntu packages are missing. No credentials
 are needed for public reads. GITHUB_TOKEN may authenticate GitHub API requests.
+Only --write in canonical's Actions context enables proposal delivery.
 """
 
 import sys
@@ -15,6 +16,7 @@ sys.dont_write_bytecode = True
 
 import argparse
 import ast
+import difflib
 import hashlib
 import json
 import math
@@ -26,6 +28,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from urllib import request
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import yaml
@@ -38,6 +41,8 @@ BOOTSTRAP = 'python/mozboot/mozboot/util.py'
 ARCHIVE = 'https://api.launchpad.net/devel/ubuntu/+archive/primary'
 SERIES = 'https://api.launchpad.net/devel/ubuntu/noble'
 ARCHITECTURES = ('amd64', 'arm64')
+PROPOSAL_MARKER = '\n<!-- firefox-snap-msrv-proposal: '
+BOT = 'github-actions[bot]'
 
 
 class Unknown(Exception):
@@ -62,14 +67,17 @@ def version(value):
 
 
 class HTTP:
-    def __init__(self, timeout):
+    def __init__(self, timeout, write=False):
         self.opener = request.build_opener(SameOriginRedirect())
         self.timeout = timeout
         self.cache = {}
         self.headers = {}
         self.observations = []
+        self.write = write
 
-    def text(self, url):
+    def text(self, url, refresh=False):
+        if refresh:
+            self.cache.pop(url, None)
         if url not in self.cache:
             parts = urlsplit(url)
             require(parts.scheme == 'https' and parts.netloc in {
@@ -83,7 +91,7 @@ class HTTP:
                 body = response.read(8 * 1024 * 1024 + 1)
                 require(len(body) <= 8 * 1024 * 1024, 'HTTP response exceeds the evidence size limit')
                 now = datetime.now(timezone.utc)
-                if '/branches/' in url or url.startswith(ARCHIVE + '?') or '/latest-mozilla-central/' in url:
+                if parts.netloc == 'api.github.com' or url.startswith(ARCHIVE + '?') or '/latest-mozilla-central/' in url:
                     date = response.headers.get('Date')
                     require(date, 'Mutable evidence has no HTTP Date: ' + url)
                     age = float(response.headers.get('Age', '0'))
@@ -97,8 +105,28 @@ class HTTP:
                     'sha256': hashlib.sha256(body).hexdigest()})
         return self.cache[url]
 
-    def json(self, url):
-        return json.loads(self.text(url))
+    def json(self, url, refresh=False):
+        return json.loads(self.text(url, refresh=refresh))
+
+    def propose(self, endpoint, data):
+        # No arbitrary destination, ref update, force push, merge, or Issue API.
+        require(self.write, 'Proposal delivery requires explicit --write')
+        write_credentials()
+        require(endpoint in ('git/blobs', 'git/trees', 'git/commits', 'git/refs', 'pulls'),
+                'Unsupported proposal write endpoint')
+        if endpoint == 'git/refs':
+            require(re.fullmatch(r'refs/heads/automation/rust-msrv-[0-9]+\.[0-9]+\.[0-9]+', data['ref']),
+                    'Refusing to write a non-proposal branch')
+        if endpoint == 'pulls':
+            require(data['base'] == 'nightly' and re.fullmatch(
+                r'automation/rust-msrv-[0-9]+\.[0-9]+\.[0-9]+', data['head']), 'Unexpected PR target')
+        headers = {'User-Agent': 'firefox-snap-msrv-monitor', 'Accept': 'application/vnd.github+json',
+                   'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN']}
+        req = request.Request(SNAP + '/' + endpoint, data=json.dumps(data).encode(), headers=headers, method='POST')
+        with self.opener.open(req, timeout=self.timeout) as response:
+            body = response.read(8 * 1024 * 1024 + 1)
+            require(len(body) <= 8 * 1024 * 1024, 'Proposal response exceeds size limit; reconcile before retrying')
+            return json.loads(body)
 
     def pagination_page(self, first_url, url, visited):
         require(url not in visited and len(visited) < 100, 'Incomplete or cyclic evidence pagination')
@@ -230,10 +258,18 @@ def recipe_baseline(recipe):
     for part in recipe['parts'].values():
         packages(part.get('build-packages', []))
     require(binaries == {'rustc', 'cargo'}, 'Expected both versioned Rust and Cargo selections')
-    selectors = re.findall(r'^\s*rustv=([0-9]+\.[0-9]+)\s*$', recipe['parts']['firefox']['override-build'], re.M)
+    selectors = re.findall(r'^[ \t]*rustv=([0-9]+\.[0-9]+)(?:[ \t]+#.*)?[ \t]*$',
+                           recipe['parts']['firefox']['override-build'], re.M)
     require(len(selectors) == 1, 'Expected one Rust helper version selector')
     families.update(selectors)
-    families.update(re.findall(r'\bcargo-([0-9]+\.[0-9]+)\b', recipe['parts']['dump-syms']['override-build']))
+    # Comments are not compiler selections. Keep the executable invocation
+    # unambiguous without treating an explanatory old-version comment as one.
+    dump_build = recipe['parts']['dump-syms']['override-build']
+    dump_build = '\n'.join(line.split(' #', 1)[0] for line in dump_build.splitlines()
+                           if not line.lstrip().startswith('#'))
+    invocations = re.findall(r'\bcargo-([0-9]+\.[0-9]+)\b', dump_build)
+    require(len(invocations) == 1, 'Expected one versioned dump-syms Cargo invocation')
+    families.update(invocations)
     require(len(families) == 1, 'Recipe Rust/Cargo selections disagree or are absent')
     family = families.pop()
     version(family + '.0')
@@ -370,19 +406,264 @@ def observe(http, report):
         archive_availability(http, report, minimum, family, scope)
 
 
+def write_credentials():
+    require(os.environ.get('GITHUB_ACTIONS') == 'true'
+            and os.environ.get('GITHUB_REPOSITORY') == 'canonical/firefox-snap',
+            '--write requires canonical/firefox-snap GitHub Actions; local previews are read-only')
+    require(os.environ.get('GITHUB_TOKEN', '').startswith('ghs_'),
+            '--write requires the job-scoped GITHUB_TOKEN, not a personal token or repository-token fallback')
+
+
+def digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def update_recipe(text, old, new):
+    """Edit source spans, never round-trip/reformat YAML or replace globally."""
+    require(not any(isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken))
+                    for token in yaml.scan(text)), 'Recipe anchors/aliases require manual review')
+    root = yaml.compose(text, Loader=RecipeLoader)
+    edits = []
+
+    def field(node, key):
+        require(isinstance(node, yaml.MappingNode), 'Unexpected recipe mapping structure')
+        values = [value for name, value in node.value if name.value == key]
+        require(len(values) == 1, 'Expected one recipe field: ' + key)
+        return values[0]
+
+    def packages(node, allowed):
+        if isinstance(node, yaml.MappingNode):
+            for _, value in node.value:
+                packages(value, allowed)
+        elif isinstance(node, yaml.SequenceNode):
+            for value in node.value:
+                packages(value, allowed)
+        elif isinstance(node, yaml.ScalarNode):
+            match = re.fullmatch(r'(rustc|cargo)-' + re.escape(old) + r'(?::[a-z0-9-]+)?', node.value)
+            if match:
+                require(match[1] in allowed, 'Unexpected compiler package in recipe part')
+                raw = text[node.start_mark.index:node.end_mark.index]
+                token = re.fullmatch(r'''(['"]?)(?:rustc|cargo)-(''' + re.escape(old)
+                                     + r''')(?::[a-z0-9-]+)?\1''', raw)
+                require(token, 'Unexpected compiler package spelling')
+                edits.append((node.start_mark.index + token.start(2),
+                              node.start_mark.index + token.end(2), new))
+
+    parts = field(root, 'parts')
+    for name, allowed in (('dump-syms', {'cargo'}), ('firefox', {'rustc', 'cargo'})):
+        part = field(parts, name)
+        before = len(edits)
+        packages(field(part, 'build-packages'), allowed)
+        require(len(edits) > before, 'Missing compiler packages in ' + name)
+        build = field(part, 'override-build')
+        require(isinstance(build, yaml.ScalarNode) and build.style == '|',
+                'Expected a literal build script in ' + name)
+        raw = text[build.start_mark.index:build.end_mark.index]
+        if name == 'dump-syms':
+            pattern = (r'^[ \t]*cargo-(' + re.escape(old)
+                       + r')(?=[ \t]+build[ \t]+--release(?:[ \t]+#.*)?[ \t]*$)')
+        else:
+            pattern = r'^[ \t]*rustv=(' + re.escape(old) + r')(?=(?:[ \t]+#.*)?[ \t]*$)'
+            for helper in ('rustc-${rustv}', 'rust-${rustv}-clang', 'rust-${rustv}-lld',
+                           'rust-${rustv}-llvm-dwp', 'cargo-${rustv}'):
+                require(raw.count('/usr/bin/' + helper) == 1, 'Unexpected compiler/helper aliases')
+        matches = list(re.finditer(pattern, raw, re.M))
+        require(len(matches) == 1, 'Expected one compiler invocation/selector in ' + name)
+        match = matches[0]
+        edits.append((build.start_mark.index + match.start(1), build.start_mark.index + match.end(1), new))
+    updated = text
+    for start, end, value in sorted(edits, reverse=True):
+        updated = updated[:start] + value + updated[end:]
+    require(recipe_baseline(yaml.load(updated, Loader=RecipeLoader)) == new,
+            'Recipe contains uncoordinated compiler selections')
+    return updated
+
+
+def proposal_content(report, original, updated):
+    minimum = report['source']['msrv']
+    old, new = report['snap']['compiler_family'], report['archive']['selected']['family']
+    title = 'Update nightly Rust from ' + old + ' to ' + new + ' for Firefox MSRV ' + minimum
+    lines = ['## Summary', '', '```diff', '- nightly snap compiler: ' + old,
+             '+ nightly snap compiler: ' + new, '```', '',
+             'Coordinate dump-syms Cargo, Firefox Rust/Cargo packages and compiler/helper aliases.', '',
+             '## Evidence', '',
+             '- **Before:** snap compiler baseline ' + old + ' does not establish Firefox MSRV ' + minimum + '.',
+             '  Snap recipe: ' + report['snap']['recipe_url'],
+             '- **After:** official Ubuntu Noble Rust/Cargo binary publications cover amd64 and arm64.',
+             '- Triggering Firefox commit: ' + report['source']['trigger']['url'],
+             '- Pinned central declarations: ' + ' ; '.join(report['source']['declaration_urls']),
+             '- Observed at: ' + report['observed_at'],
+             '- Published-nightly source context: ' + report['published_nightly']['metadata_url'],
+             '  Mercurial revision: ' + report['published_nightly']['revision'] + '.',
+             '  Preparatory central work; this is not proof of a failure in a published snap.', '']
+    for arch, binaries in report['archive']['selected']['packages'].items():
+        for binary, publication in binaries.items():
+            url = publication['url']
+            require(isinstance(url, str) and re.fullmatch(re.escape(ARCHIVE) + r'/\+binarypub/[A-Za-z0-9]+', url),
+                    'Unexpected binary-publication evidence URL')
+            lines.append('- ' + arch + ' ' + binary + ': `' + publication['version'] + '` ('
+                         + publication['pocket'] + '), published ' + publication['published_at'] + ': ' + url)
+    lines.extend(['', '**No package installation or Firefox build tests were performed.**', '',
+                  '## Merge Danger', '', '**Door:** two-way', '',
+                  'A reviewed recipe change can be reverted; this PR does not merge or publish a snap.', '',
+                  '**Blast Radius:** nightly', '',
+                  'Package publication is not proof of installation or build compatibility.', ''])
+    public = '\n'.join(lines)
+    metadata = {'schema': 1, 'need': 'canonical/firefox-snap:nightly:rust-' + minimum,
+                'base': report['snap']['revision'], 'original_sha256': digest(original),
+                'recipe_sha256': digest(updated), 'title': title, 'body_sha256': digest(public),
+                'evidence': {key: report[key] for key in ('observed_at', 'source', 'snap', 'published_nightly')},
+                'archive': report['archive']['selected']}
+    return title, public, metadata
+
+
+def proposal_body(public, metadata):
+    return public + PROPOSAL_MARKER + json.dumps(metadata, sort_keys=True) + ' -->'
+
+
+def reconcile_proposal(http, proposal):
+    # Scan all states (not search's eventually consistent index), retaining closed
+    # work and checking markers as well as deterministic branch identity.
+    url = SNAP + '/pulls?' + urlencode({'state': 'all', 'per_page': 100})
+    matches = []
+    for pull in http.history(url):
+        require(isinstance(pull, dict) and isinstance(pull.get('head'), dict)
+                and isinstance(pull['head'].get('ref'), str), 'Malformed PR collection entry')
+        body = pull.get('body') or ''
+        metadata = None
+        if PROPOSAL_MARKER in body:
+            try:
+                metadata = json.loads(body.split(PROPOSAL_MARKER, 1)[1].split(' -->', 1)[0])
+            except (ValueError, TypeError):
+                require(pull['head']['ref'] == proposal['branch'],
+                        'Corrupt proposal metadata; manual recovery required')
+            require(metadata is None or isinstance(metadata, dict), 'Malformed proposal metadata')
+        if (pull['head']['ref'] == proposal['branch']
+                or metadata and metadata.get('need') == proposal['need']):
+            matches.append(pull)
+    require(len(matches) <= 1, 'Multiple matching PRs; manual recovery required')
+    if not matches:
+        return False
+    pull = matches[0]
+    require(type(pull['number']) is int and pull['number'] > 0, 'Invalid proposal PR number')
+    pull = http.json(SNAP + '/pulls/' + str(pull['number']), refresh=True)
+    require(pull['html_url'] == 'https://github.com/canonical/firefox-snap/pull/' + str(pull['number']),
+            'Invalid existing PR identity')
+    proposal['url'] = pull['html_url']
+    proposal['number'] = pull['number']
+    proposal['status'] = 'held'
+    proposal['reason'] = 'Existing work is closed, modified or no longer matches; no automatic edits or recreation.'
+    try:
+        public, encoded = pull['body'].split(PROPOSAL_MARKER)
+        metadata = json.loads(encoded.removesuffix(' -->'))
+        intact = (metadata['schema'] == 1 and metadata['need'] == proposal['need']
+                  and pull['user']['login'] == BOT and pull['head']['repo']['full_name'] == 'canonical/firefox-snap'
+                  and pull['base']['repo']['full_name'] == 'canonical/firefox-snap' and pull['base']['ref'] == 'nightly'
+                  and pull['head']['ref'] == proposal['branch'] and pull['head']['sha'] == metadata['head']
+                  and pull['title'] == metadata['title'] and digest(public) == metadata['body_sha256']
+                  and metadata['archive']['family'] == proposal['compiler_family'])
+        if intact and pull['state'] == 'open':
+            proposal['status'] = 'existing'
+            proposal['reason'] = 'Reuse intact existing proposal; no branch or PR updates.'
+            proposal['retained_metadata'] = metadata
+            proposal.update(body=pull['body'], title=pull['title'], head=pull['head']['sha'])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        pass  # Human-owned or damaged work is not ours to overwrite.
+    return True
+
+
+def prepare_proposal(http, report, write):
+    # Re-observe the snap if another updater changed it during archive lookup.
+    # Immutable source evidence and still-fresh archive responses remain pinned.
+    current = revision(http.json(SNAP + '/branches/nightly', refresh=True)['commit']['sha'])
+    if current != report['snap']['revision']:
+        report.pop('archive', None)
+        observe(http, report)
+        if report['outcome'] != 'compiler-available':
+            return
+    original = http.text(report['snap']['recipe_url'])
+    updated = update_recipe(original, report['snap']['compiler_family'], report['archive']['selected']['family'])
+    title, public, metadata = proposal_content(report, original, updated)
+    proposal = {'need': metadata['need'], 'branch': 'automation/rust-msrv-' + report['source']['msrv'],
+                'compiler_family': report['archive']['selected']['family'],
+                'base': 'nightly', 'repository': 'canonical/firefox-snap', 'title': title,
+                'body': proposal_body(public, metadata), 'status': 'preview',
+                'diff': ''.join(difflib.unified_diff(original.splitlines(keepends=True), updated.splitlines(keepends=True),
+                                                   fromfile='a/snapcraft.yaml', tofile='b/snapcraft.yaml'))}
+    report['proposal'] = proposal
+    if reconcile_proposal(http, proposal):
+        return
+    ref_url = SNAP + '/git/ref/heads/' + proposal['branch']
+    try:
+        http.json(ref_url)
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        error.close()
+    else:
+        raise Unknown('Proposal branch exists without an identifiable PR; manual recovery required')
+    base = report['snap']['revision']
+    commit = http.json(SNAP + '/git/commits/' + base)
+    tree = revision(commit['tree']['sha'])
+    entries = http.json(SNAP + '/git/trees/' + tree)
+    require(entries['truncated'] is False, 'Incomplete snap base tree')
+    recipes = [entry for entry in entries['tree'] if entry['path'] == 'snapcraft.yaml']
+    original_bytes = original.encode()
+    original_blob = hashlib.sha1(b'blob ' + str(len(original_bytes)).encode() + b'\0' + original_bytes).hexdigest()
+    require(len(recipes) == 1 and recipes[0]['type'] == 'blob' and recipes[0]['mode'] == '100644'
+            and recipes[0]['sha'] == original_blob, 'Unexpected recipe mode or base blob; manual review required')
+    if not write:
+        return
+    blob = revision(http.propose('git/blobs', {'content': updated, 'encoding': 'utf-8'})['sha'])
+    tree = revision(http.propose('git/trees', {'base_tree': tree, 'tree': [
+        {'path': 'snapcraft.yaml', 'mode': '100644', 'type': 'blob', 'sha': blob}]})['sha'])
+    # Omit author/committer so GitHub supplies the authenticated identity. Verify
+    # it BEFORE publishing a ref; another App's token must not trigger the importer.
+    commit = http.propose('git/commits', {'message': title, 'tree': tree, 'parents': [base]})
+    require(commit['author']['name'] == BOT and commit['committer']['name'] == BOT,
+            'Authenticated commit is not github-actions[bot]; refusing to publish a branch')
+    head = revision(commit['sha'])
+    metadata['head'] = head
+    proposal['body'] = proposal_body(public, metadata)
+    proposal['head'] = head
+    require(revision(http.json(SNAP + '/branches/nightly', refresh=True)['commit']['sha']) == base,
+            'Nightly changed during proposal preparation; rerun against the new base')
+    # Creation is atomic and never replaces an existing ref. Ambiguous failures
+    # stop here; the next invocation reconciles PRs/refs instead of retrying POST.
+    http.propose('git/refs', {'ref': 'refs/heads/' + proposal['branch'], 'sha': head})
+    proposal['status'] = 'branch-created'
+    require(http.json(ref_url, refresh=True)['object']['sha'] == head,
+            'Proposal branch changed before PR creation; manual reconciliation required')
+    pull = http.propose('pulls', {'title': title, 'body': proposal['body'], 'base': 'nightly',
+                                 'head': proposal['branch'], 'maintainer_can_modify': False})
+    require(type(pull['number']) is int and pull['number'] > 0
+            and pull['html_url'] == 'https://github.com/canonical/firefox-snap/pull/' + str(pull['number'])
+            and pull['head']['sha'] == head and pull['base']['ref'] == 'nightly',
+            'PR response is not durably identifiable; reconcile before retrying')
+    proposal.update(status='created', number=pull['number'], url=pull['html_url'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--timeout', type=float, default=30, help='HTTP timeout in seconds (default: 30)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', help='Read-only preview (the default)')
+    mode.add_argument('--write', action='store_true', help='Propose a PR using canonical\'s Actions job token')
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('HTTP timeout must be finite and positive')
     report = {'outcome': 'unknown', 'observed_at': datetime.now(timezone.utc).isoformat(),
               'inspection': 'Read-only metadata; no installation or build tests performed.'}
-    http = HTTP(args.timeout)
+    http = HTTP(args.timeout, write=args.write)
     try:
+        if args.write:
+            write_credentials()
         observe(http, report)
+        if report['outcome'] == 'compiler-available':
+            prepare_proposal(http, report, args.write)
     except (Unknown, OSError, HTTPException, ValueError, TypeError, KeyError, SyntaxError, yaml.YAMLError) as error:
         report['outcome'] = 'unknown'
+        report['summary'] = 'Check or delivery stopped safely; inspect the error and retained evidence before retrying.'
         report['error'] = str(error)
     report['observations'] = http.observations
     print(json.dumps(report, indent=2))

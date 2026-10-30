@@ -8,8 +8,8 @@ reason to do otherwise.
 [1]https://snapcraft.io/firefox
 [2]https://launchpad.net/~mozilla-snaps/+snaps
 
-Read-only Firefox MSRV monitor
-------------------------------
+Firefox MSRV monitor and compiler-update proposals
+--------------------------------------------------
 
 From the repository root, with Python 3.11+, PyYAML and dpkg available:
 
@@ -38,14 +38,67 @@ for GitHub API rate limits and is not forwarded to other hosts. No token is
 needed for anonymous public reads. The per-request timeout defaults to 30 seconds
 and can be changed with --timeout.
 
-This command only reads HTTPS resources and prints its report. It does not
-persist state, change the recipe, push branches, open Issues/PRs, file Launchpad
-bugs, install packages or run builds. No workflow or automatic execution is
-installed by this change.
+By default (or explicitly with --dry-run), this command only reads HTTPS resources
+and prints its JSON report. When a compiler is available, proposal.diff and
+proposal.body preview the coordinated recipe update and PR explanation. The
+editor changes only existing dump-syms Cargo selections/invocation, Firefox's
+Rust/Cargo packages and its compiler/helper selector. Qualifiers, quoting,
+comments, Firefox version and unrelated settings are preserved. Unexpected
+structure, aliases or conflicting selections require manual review, not broad
+replacement. No local recipe or monitor state is modified in any mode.
+
+Explicit proposal delivery (not activated here)
+----------------------------------------------
+
+Only --write enables external writes, and only in canonical/firefox-snap's
+GitHub Actions context using its job-scoped GITHUB_TOKEN. The future workflow
+must pass secrets.GITHUB_TOKEN with job-scoped contents: write and
+pull-requests: write permissions. Do NOT pass a personal/App token, GH_TOKEN or
+the existing repository-token secret: bot-token event suppression is what keeps
+proposal pushes from invoking the push-triggered Launchpad importer. The command
+does not fall back to those credentials. It rejects personal-token formats and,
+before publishing a ref, verifies GitHub's default commit author/committer is
+github-actions[bot]. Missing permissions or a different identity fail closed;
+do not bypass this by explicitly supplying a bot author with a different token.
+
+    python3 -B .github/scripts/check-rust-msrv.py --write
+
+The command rereads nightly before preparing a proposal. If it changed during
+archive lookup, the existing observation logic checks the newer recipe; a second
+base check before ref creation stops a detected race. The immutable base tree
+and recipe blob are checked, and the proposed commit inherits the complete base
+tree with only snapcraft.yaml changed. The new ref is always
+automation/rust-msrv-<full-required-version>, and the PR always targets
+canonical/firefox-snap:nightly. Ref creation is atomic and never replaces an
+existing branch. A later nightly update remains ordinary PR review/merge work;
+this is not an atomic transaction across two GitHub refs.
+
+Before delivery, all PR states/pages are inspected for the need identity or
+proposal branch. An intact open bot proposal is reused without edits. Closed,
+human-edited, retargeted or different-compiler proposals are held, not recreated
+or overwritten. The PR contains durable identity, pinned source/snap evidence,
+archive publications and content/head hashes in a machine-readable comment.
+These hashes detect changes, not authenticate untrusted content. Duplicate
+matches, corrupt metadata or an orphan branch stop delivery for manual recovery.
+Ambiguous API failures are not automatically retried; the next invocation
+reconciles existing work before attempting delivery. Broader lifecycle/resume,
+report-Issue linkage and durable failure-state handling remain follow-up work.
+
+No-write mode also inspects existing proposals and reports preview, existing or
+held status without state persistence or external writes, even when a write-capable
+token is present. A write-enabled run can report created or branch-created if PR
+delivery subsequently fails. Unknown evidence/delivery returns status 1; held work
+is an established observation, not an API failure. No mode writes to nightly,
+beta, stable or ESR, merges/approves a PR, opens a report Issue, writes to Launchpad,
+installs packages or runs builds. No workflow or automatic execution is installed
+by this change. Maintainer permission/import-side-effect preflight and scheduled
+activation remain separate rollout tasks; do not open live test PRs for validation.
 
 Run the deterministic command-level tests without network access or credentials:
 
     python3 -B -m unittest discover -s .github/scripts/tests -v
 
-The tests replace external HTTP I/O, reject non-GET requests and filesystem
-mutations, and exercise the real command and Debian version comparator.
+The tests replace external HTTP I/O, reject filesystem mutations and all writes
+in no-write mode, and exercise the real command and Debian version comparator.
+Write-mode tests use disposable GitHub API records to inspect proposed blobs,
+trees, refs and PRs without network requests or real credentials.
